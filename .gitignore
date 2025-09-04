@@ -1,0 +1,6 @@
+Veridis/bin/*
+Veridis/obj/*
+Veridis/CopilotIndices/*
+Veridis/.vs/
+
+Veridis/packages/

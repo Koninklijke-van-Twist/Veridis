@@ -1,0 +1,91 @@
+name: Build and Release on Master Push
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Restore dependencies
+        working-directory: Veridis
+        run: dotnet restore
+
+      - name: Build with MSBuild
+        working-directory: Veridis
+        run: |
+          & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe" "Veridis.csproj" /p:Configuration=Release
+
+      - name: Write release version
+        working-directory: Veridis
+        run: |
+          echo "release ${{ github.run_number }}" > bin/Release/release.number
+          Get-Content bin/Release/release.number
+        shell: pwsh
+
+      - name: Zip output
+        working-directory: Veridis
+        run: |
+          Compress-Archive -Path bin\Release\* -DestinationPath ../Veridis_r${{ github.run_number }}.zip
+
+      - name: Find merged PR
+        id: find_pr
+        uses: jwalton/gh-find-current-pr@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get PR body
+        id: pr_body
+        if: steps.find_pr.outputs.pr != ''
+        run: |
+          echo "PR_BODY<<EOF" >> $GITHUB_ENV
+          gh pr view ${{ steps.find_pr.outputs.pr }} --json body -q .body >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write changelog
+        id: changelog
+        run: |
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+
+          if [[ -n "${{ env.PR_BODY }}" ]]; then
+            # Extract lines under "## Changelog:" until the next header or end of body.
+            CL=$(echo "${{ env.PR_BODY }}" | awk '/## Changelog:/ {flag=1; next} /^## / {flag=0} flag')
+            if [[ -n "$CL" ]]; then
+              echo "$CL" >> $GITHUB_ENV
+            fi
+          else
+            echo "::notice ::No PR found, using latest commit description for changelog."
+            # Get the body (description) of the latest commit ONLY
+            COMMIT_DESC=$(git log -1 --pretty=format:"%b")
+            if [[ -n "$COMMIT_DESC" ]]; then
+              echo "$COMMIT_DESC" >> $GITHUB_ENV
+            fi
+          fi
+          echo "EOF" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release - ${{ github.run_number }}"
+          files: Veridis_r${{ github.run_number }}.zip
+          tag_name: "release-${{ github.run_number }}"
+          body: |
+            ${{ env.RELEASE_NOTES }}
+
+            If you encounter any issues, please report them to ict@kvt.nl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
