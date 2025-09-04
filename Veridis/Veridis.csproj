@@ -6,7 +6,12 @@
         <Nullable>enable</Nullable>
         <UseWindowsForms>true</UseWindowsForms>
         <ImplicitUsings>enable</ImplicitUsings>
+        <ApplicationIcon>kvtlogo.ico</ApplicationIcon>
     </PropertyGroup>
+
+    <ItemGroup>
+      <Content Include="kvtlogo.ico" />
+    </ItemGroup>
 
     <ItemGroup>
       <PackageReference Include="PdfPig" Version="0.1.12-alpha-20250903-e4ed4" />
