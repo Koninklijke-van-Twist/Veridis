@@ -1,16 +1,32 @@
-namespace Veridis;
-
-static class Program
+namespace Veridis
 {
-    /// <summary>
-    ///  The main entry point for the application.
-    /// </summary>
-    [STAThread]
-    static void Main()
+    static class Program
     {
-        // To customize application configuration such as set high DPI settings or default font,
-        // see https://aka.ms/applicationconfiguration.
-        ApplicationConfiguration.Initialize();
-        Application.Run(new Form1());
+        [STAThread]
+        static void Main(string[] args)
+        {
+            // Headless mode: run if single argument is a PDF file
+            if (args.Length == 1 &&
+                File.Exists(args[0]) &&
+                string.Equals(Path.GetExtension(args[0]), ".pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    string pdfPath = args[0];
+                    Form1.ExportFixedTxt(pdfPath);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error while processing invoice:\n{ex.Message}",
+                        "Fix Invoice", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+                return; // do not launch the WinForms UI
+            }
+
+            // Normal WinForms mode
+            ApplicationConfiguration.Initialize();
+            Application.Run(new Form1());
+        }
     }
 }

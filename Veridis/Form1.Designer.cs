@@ -29,8 +29,10 @@ partial class Form1
     /// </summary>
     private void InitializeComponent()
     {
+        System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Form1));
         openFileDialog1 = new OpenFileDialog();
         startButton = new Button();
+        contextMenuToggle = new CheckBox();
         SuspendLayout();
         // 
         // openFileDialog1
@@ -39,23 +41,39 @@ partial class Form1
         // 
         // startButton
         // 
-        startButton.Location = new Point(212, 158);
+        startButton.Location = new Point(12, 37);
         startButton.Name = "startButton";
-        startButton.Size = new Size(75, 23);
+        startButton.Size = new Size(241, 60);
         startButton.TabIndex = 0;
         startButton.Text = "Open Invoice";
         startButton.UseVisualStyleBackColor = true;
         startButton.Click += startButton_Click_1;
         // 
+        // contextMenuToggle
+        // 
+        contextMenuToggle.AutoSize = true;
+        contextMenuToggle.Location = new Point(12, 12);
+        contextMenuToggle.Name = "contextMenuToggle";
+        contextMenuToggle.Size = new Size(185, 19);
+        contextMenuToggle.TabIndex = 1;
+        contextMenuToggle.Text = "Allow Right-Clicking PDF Files";
+        contextMenuToggle.UseVisualStyleBackColor = true;
+        contextMenuToggle.CheckedChanged += contextMenuToggle_CheckedChanged;
+        // 
         // Form1
         // 
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(800, 450);
+        ClientSize = new Size(267, 110);
+        Controls.Add(contextMenuToggle);
         Controls.Add(startButton);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        Icon = (Icon)resources.GetObject("$this.Icon");
+        MaximizeBox = false;
         Name = "Form1";
-        Text = "Form1";
+        Text = "Veridis";
         ResumeLayout(false);
+        PerformLayout();
     }
 
     private System.Windows.Forms.Button startButton;
@@ -63,4 +81,6 @@ partial class Form1
     private System.Windows.Forms.OpenFileDialog openFileDialog1;
 
     #endregion
+
+    private CheckBox contextMenuToggle;
 }
