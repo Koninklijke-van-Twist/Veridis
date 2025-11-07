@@ -40,6 +40,7 @@ public static class TextFileExporter
             "0",                                                            // Total VAT Value (supplier sample shows 0)
             header.VatNumber ?? "",
             totals.NetTotal.ToString("0.00", CultureInfo.InvariantCulture), // Sub Total3
+            "", "", "", "", "", "", "", "" // Required for import
         };
         sb.AppendLine(ToCsvRow(rt1));
 
@@ -91,7 +92,8 @@ public static class TextFileExporter
                 "OTHERS or CAR CHG",
                 "0", "0",
                 totals.OtherCharges.ToString("0.00", CultureInfo.InvariantCulture), // Nett Value
-                "0","0","0","0","0","0","0"                                         // rest are zeros in sample
+                "0","0","0","0","0","0","0",                                         // rest are zeros in sample
+                "", "", "", "", "", "", "", "" // Required for import
             };
             sb.AppendLine(ToCsvRow(rt3));
         }
