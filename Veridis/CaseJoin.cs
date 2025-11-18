@@ -1,26 +1,69 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.Text.Json;
+using System.Text.RegularExpressions;
 using Veridis;
+using System.Security.Cryptography;
+using System.Text;
 
 public static class CaseJoin
 {
+
+    private static HashSet<string> storedHashes = new HashSet<string>();
+
+    public static string ContentHash(this object obj)
+    {
+        // Serialise to a deterministic string
+        var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions
+        {
+            WriteIndented = false,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+
+        // Hash it
+        using var sha = SHA256.Create();
+        var bytes = Encoding.UTF8.GetBytes(json);
+        var hash = sha.ComputeHash(bytes);
+
+        // Convert to hex string
+        return Convert.ToHexString(hash);
+    }
+
+    public static List<T> FilterNewObjects<T>(this IEnumerable<T> objects, HashSet<string> knownHashes)
+    {
+        var result = new List<T>();
+
+        foreach (var obj in objects)
+        {
+            var hash = obj.ContentHash();
+            if (!knownHashes.Contains(hash))
+            {
+                result.Add(obj);
+            }
+        }
+
+        return result;
+    }
+
     public static IEnumerable<CaseRecord2> BuildCaseRecords(
         InvoiceHeader H,
         List<DetailLine> pdfDetails,
         List<CaseAlloc> cases,
         List<SupplierTxtDetail>? txtDetails = null)
     {
-        var byItemPdf = pdfDetails.GroupBy(d => d.ProductId).ToDictionary(g => g.Key, g => g.ToList());
-        var byItemTxt = (txtDetails ?? new()).GroupBy(d => d.ProductId).ToDictionary(g => g.Key, g => g.ToList());
+        var byItemPdf = pdfDetails.GroupBy(d => d.ProductId).ToDictionary(g => g.Key, g => g.ToList().FilterNewObjects(storedHashes));
+        var byItemTxt = (txtDetails ?? new()).GroupBy(d => d.ProductId).ToDictionary(g => g.Key, g => g.ToList().FilterNewObjects(storedHashes));
+
 
         foreach (var c in cases)
         {
             SupplierTxtDetail? td = null;
             byItemTxt.TryGetValue(c.ProductId, out var txtList);
 
+
             // Prefer TXT detail with the best description match (fallback: first)
             if (txtList is not null && txtList.Count > 0)
             {
                 td = txtList.OrderByDescending(x => Score(Norm(c.Description), Norm(x.PartDescription))).First();
+                storedHashes.Add(td.ContentHash());
             }
 
             // If no TXT detail, fall back to PDF detail
@@ -87,7 +130,7 @@ public static class CaseJoin
     }
 
     private static string Norm(string s) => new string(s.Where(ch => char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch)).ToArray()).ToUpperInvariant();
-    private static int Score(string a, string b) => a.Length == 0 || b.Length == 0 ? 0 : (b.StartsWith(a[..Math.Min(a.Length, 12)]) ? 2 : a.Split(' ').Intersect(b.Split(' ')).Count());
+    private static int Score(string a, string b) => a.Length == 0 || b.Length == 0 ? 0 : (b.StartsWith(a[..Math.Min(a.Length, Math.Min(a.Length, b.Length))]) ? 2 : a.Split(' ').Intersect(b.Split(' ')).Count());
 
     public static string NormalizeWeight(string? rawKg)
     {

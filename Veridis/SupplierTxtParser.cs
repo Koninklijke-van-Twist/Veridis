@@ -25,7 +25,8 @@ public record SupplierTxtDetail(
     string PartDescription,
     string Uoi,
     string NetWeight,          // as printed in TXT (we’ll normalise in CaseJoin)
-    string CpcCode
+    string CpcCode,
+    int lineNumber = -1
 );
 
 public static class SupplierTxtParser
@@ -75,6 +76,7 @@ public static class SupplierTxtParser
     private static List<SupplierTxtDetail> ParseDetails(List<string> lines)
     {
         var result = new List<SupplierTxtDetail>();
+        int i = 0;
 
         foreach (var line in lines)
         {
@@ -105,8 +107,10 @@ public static class SupplierTxtParser
                 PartDescription: Get(cols, 19),
                 Uoi: Get(cols, 20),
                 NetWeight: Get(cols, 21),
-                CpcCode: Get(cols, 22)
+                CpcCode: Get(cols, 22),
+                lineNumber: i
             );
+            i++;
 
             // NOTE: we deliberately ignore the HU column (index 15) because it may contain grouped HUs like "A/B/..."
             // We will replace HUs using the PDF cases.
