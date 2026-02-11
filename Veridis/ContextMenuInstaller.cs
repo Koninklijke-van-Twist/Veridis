@@ -12,12 +12,12 @@ public static class ContextMenuInstaller
         string quotedExe = $"\"{exePath}\"";
         string command = $"{quotedExe} \"%1\"";
 
-        using (var shellKey = Registry.CurrentUser.CreateSubKey(PdfVerbKey))
+        using (RegistryKey shellKey = Registry.CurrentUser.CreateSubKey(PdfVerbKey))
         {
             shellKey!.SetValue(null, "Fix Invoice");                 // default value (menu text)
             shellKey.SetValue("Icon", $"{quotedExe},0");             // use your EXE icon
         }
-        using (var cmdKey = Registry.CurrentUser.CreateSubKey(PdfCmdKey))
+        using (RegistryKey cmdKey = Registry.CurrentUser.CreateSubKey(PdfCmdKey))
         {
             cmdKey!.SetValue(null, command);                         // default value is the command
         }
@@ -38,7 +38,7 @@ public static class ContextMenuInstaller
 
     public static bool IsInstalled()
     {
-        using var k = Registry.CurrentUser.OpenSubKey(PdfCmdKey, writable: false);
+        using RegistryKey? k = Registry.CurrentUser.OpenSubKey(PdfCmdKey, writable: false);
         return k != null;
     }
 
