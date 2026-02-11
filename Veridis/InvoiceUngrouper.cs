@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Content;
 
 public static class InvoiceTxtFixer
 {
@@ -104,14 +105,17 @@ public static class InvoiceTxtFixer
                 var newCols = new List<string>(cols);
 
                 // HU kolom (15) padded naar 20 digits zoals jij wil
-                newCols[15] = Quote(PadHu20(r.Hu));
+                newCols[15] = PadHu20(r.Hu);
 
                 // PickQuantity (6) = PDF quantity
-                newCols[6] = Quote(r.Quantity.ToString("0.000", CultureInfo.InvariantCulture));
+                newCols[6] = r.Quantity.ToString("0.000", CultureInfo.InvariantCulture);
 
                 // NettValue (7) = unitPrice * qty (2 decimals is typisch voor currency; pas aan als jouw TXT anders is)
                 decimal newNett = Round2(unitPrice * r.Quantity);
-                newCols[7] = Quote(newNett.ToString("0.00", CultureInfo.InvariantCulture));
+                newCols[7] = newNett.ToString("0.00", CultureInfo.InvariantCulture);
+
+                for (int i = 0; i < newCols.Count; i++)
+                    newCols[i] = Quote(newCols[i]);
 
                 sw.WriteLine(string.Join(",", newCols));
             }
@@ -119,46 +123,94 @@ public static class InvoiceTxtFixer
     }
 
     static readonly Regex RxCaseRow = new Regex(
-        @"(?<hu>\d{10})\s+(?<del>\d+)\s+(?<pid>\S+)\s+.*?\s+(?<coo>[A-Z]{2})\s+(?<qty>\d+)\b",
-        RegexOptions.Compiled | RegexOptions.Singleline);
+    @"(?<hu>\d{10})\s+(?<del>\d+)\s+(?<pid>\S+)\s+.*?\s+(?<coo>[A-Z]{2})\s*(?<qty>\d+)\b" +
+    @"(?=\s+\d{10}\s+\d+\s+\S+|\s*$)",
+    RegexOptions.Compiled | RegexOptions.Singleline);
 
-
-
-    private static List<CaseDetail> ParseCaseDetailsFromPdf(string pdfPath)
+    public static List<CaseDetail> ParseCaseDetailsFromPdf(string pdfPath)
     {
         var results = new List<CaseDetail>();
 
-
-
-        using var doc = UglyToad.PdfPig.PdfDocument.Open(pdfPath);
+        using var doc = PdfDocument.Open(pdfPath);
 
         foreach (var page in doc.GetPages())
         {
-            var text = page.Text ?? "";
-            if (!text.Contains("Case Details", StringComparison.OrdinalIgnoreCase))
+            // snelle filter: alleen pagina’s waar “Case Details” op staat
+            var pageText = page.Text ?? "";
+            if (!pageText.Contains("Case Details", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            // Maak zoeken robuust: alle whitespace => één spatie
-            var norm = Regex.Replace(text, @"\s+", " ").Trim();
+            // 1) Words ophalen en groeperen tot “regels” op Y
+            var words = page.GetWords().ToList();
 
-            var start = norm.IndexOf("Handling Unit", StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-                continue;
-
-            var chunk = norm.Substring(start);
-
-            var matches = RxCaseRow.Matches(chunk);
-            foreach (System.Text.RegularExpressions.Match m in matches)
+            // Sorteer: boven naar beneden (Y hoog -> laag), links naar rechts (X laag -> hoog)
+            words.Sort((a, b) =>
             {
-                var hu20 = m.Groups["hu"].Value.PadLeft(20, '0');
-                var del = m.Groups["del"].Value;
-                var pid = m.Groups["pid"].Value;      // kan dus "2644C317/22" zijn
-                var coo = m.Groups["coo"].Value;
+                var dy = b.BoundingBox.Bottom.CompareTo(a.BoundingBox.Bottom);
+                return dy != 0 ? dy : a.BoundingBox.Left.CompareTo(b.BoundingBox.Left);
+            });
 
-                if (!int.TryParse(m.Groups["qty"].Value, out var qty))
+            // Groepeer op “lijn” met Y-tolerantie
+            var lines = new List<List<Word>>();
+            const double yTol = 1.5; // soms 1.0 of 2.0 beter; 1.5 is vaak oké
+
+            foreach (var w in words)
+            {
+                if (string.IsNullOrWhiteSpace(w.Text))
                     continue;
 
-                results.Add(new CaseDetail(hu20, del, pid, coo, qty));
+                var y = w.BoundingBox.Bottom;
+
+                var last = lines.LastOrDefault();
+                if (last == null)
+                {
+                    lines.Add(new List<Word> { w });
+                    continue;
+                }
+
+                var lastY = last[0].BoundingBox.Bottom;
+                if (Math.Abs(lastY - y) <= yTol)
+                    last.Add(w);
+                else
+                    lines.Add(new List<Word> { w });
+            }
+
+            // 2) Maak tekstregels en parse “Case Details” rijen
+            foreach (var lineWords in lines)
+            {
+                var ordered = lineWords.OrderBy(w => w.BoundingBox.Left).ToList();
+                var line = string.Join(" ", ordered.Select(w => w.Text)).Trim();
+
+                // We verwachten: HU(10 digits) Delivery(digits) ProductId ... Country(2 letters) Qty(int)
+                // Voorbeeld: 4401762522 100794958 5589401 OIL FILTER TN 189
+                var tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (tokens.Length < 6)
+                    continue;
+
+                if (!(tokens[0].Length == 10 && tokens[0].All(char.IsDigit)))
+                    continue;
+
+                var hu20 = tokens[0].PadLeft(20, '0');
+                var delivery = tokens[1];
+                var productId = tokens[2];
+
+                // Laatste token qty, voorlaatste country
+                var qtyTok = tokens[^1];
+                var cooTok = tokens[^2];
+
+                if (!int.TryParse(qtyTok, NumberStyles.Integer, CultureInfo.InvariantCulture, out var qty))
+                    continue;
+
+                if (!(cooTok.Length == 2 && cooTok.All(char.IsLetter)))
+                    continue;
+
+                results.Add(new CaseDetail(
+                    Hu: hu20,
+                    DeliveryNumber: delivery,
+                    ProductId: productId,
+                    Country: cooTok.ToUpperInvariant(),
+                    Quantity: qty
+                ));
             }
         }
 
