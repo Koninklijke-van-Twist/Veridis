@@ -47,6 +47,9 @@ public partial class Form1 : Form
         if (openFileDialog1.ShowDialog() is not DialogResult.OK) return;
 
         ExportFixedTxt(openFileDialog1.FileName);
+
+        MessageBox.Show($"Invoice fixed.\nPlease inspect the output to ensure the changes are correct.\n{openFileDialog1.FileName}",
+                       "Fix Invoice", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     public static void ExportFixedTxt(string fileName)

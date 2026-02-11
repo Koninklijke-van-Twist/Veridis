@@ -5,6 +5,8 @@ namespace Veridis
         [STAThread]
         static void Main(string[] args)
         {
+            // Normal WinForms mode
+            ApplicationConfiguration.Initialize();
             // Headless mode: run if single argument is a PDF file
             if (args.Length == 1 &&
                 File.Exists(args[0]) &&
@@ -24,8 +26,6 @@ namespace Veridis
                 return; // do not launch the WinForms UI
             }
 
-            // Normal WinForms mode
-            ApplicationConfiguration.Initialize();
             Application.Run(new Form1());
         }
     }
