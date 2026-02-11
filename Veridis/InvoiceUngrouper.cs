@@ -119,58 +119,52 @@ public static class InvoiceTxtFixer
     }
 
     static readonly Regex RxCaseRow = new Regex(
-    @"(?<hu>\d{10})\s+(?<del>\d{9})\s+(?<pid>[A-Z0-9][A-Z0-9\-]{3,})\s+" +
-    @"(?<desc>.*?)\s+(?<coo>[A-Z]{2})\s+(?<qty>\d+)" +
-    @"(?=\s+\d{10}\s+\d{9}\s+[A-Z0-9][A-Z0-9\-]{3,}\s+|$)",
-    RegexOptions.Compiled | RegexOptions.Singleline
-);
+        @"(?<hu>\d{10})\s+(?<del>\d+)\s+(?<pid>\S+)\s+.*?\s+(?<coo>[A-Z]{2})\s+(?<qty>\d+)\b",
+        RegexOptions.Compiled | RegexOptions.Singleline);
+
 
 
     private static List<CaseDetail> ParseCaseDetailsFromPdf(string pdfPath)
     {
         var results = new List<CaseDetail>();
 
+
+
         using var doc = UglyToad.PdfPig.PdfDocument.Open(pdfPath);
+
         foreach (var page in doc.GetPages())
         {
             var text = page.Text ?? "";
             if (!text.Contains("Case Details", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            // Pak substring vanaf "Handling Unit" (header begint daar)
-            var start = text.IndexOf("Handling Unit", StringComparison.OrdinalIgnoreCase);
+            // Maak zoeken robuust: alle whitespace => één spatie
+            var norm = Regex.Replace(text, @"\s+", " ").Trim();
+
+            var start = norm.IndexOf("Handling Unit", StringComparison.OrdinalIgnoreCase);
             if (start < 0)
                 continue;
 
-            var chunk = text.Substring(start);
-
-            // Optioneel: knip af bij duidelijke footer/volgende sectie als die voorkomt
-            var end = chunk.IndexOf("Invoice Detail", StringComparison.OrdinalIgnoreCase);
-            if (end > 0) chunk = chunk.Substring(0, end);
+            var chunk = norm.Substring(start);
 
             var matches = RxCaseRow.Matches(chunk);
-            foreach (Match m in matches)
+            foreach (System.Text.RegularExpressions.Match m in matches)
             {
                 var hu20 = m.Groups["hu"].Value.PadLeft(20, '0');
                 var del = m.Groups["del"].Value;
-                var pid = m.Groups["pid"].Value;
+                var pid = m.Groups["pid"].Value;      // kan dus "2644C317/22" zijn
                 var coo = m.Groups["coo"].Value;
 
                 if (!int.TryParse(m.Groups["qty"].Value, out var qty))
                     continue;
 
-                results.Add(new CaseDetail(
-                    Hu: hu20,
-                    DeliveryNumber: del,
-                    ProductId: pid,
-                    Country: coo,
-                    Quantity: qty
-                ));
+                results.Add(new CaseDetail(hu20, del, pid, coo, qty));
             }
         }
 
         return results;
     }
+
 
 
     private static int FindToken(List<string> tokens, string token)
