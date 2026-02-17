@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Linq;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 
@@ -329,9 +330,13 @@ public static class InvoiceTxtFixer
         return results;
     }
 
+
+    // Line info for record type 2 rows
+    record LineInfo(int Index, List<string> Cols, string ProductId, string Hu, decimal Qty, decimal Nett, decimal UnitPrice);
+
     private static void VerifyFixedAgainstPdf(string fixedFilePath, string pdfPath, string reportPath)
     {
-        // Read PDF case details and compute expected HU+Product totals
+        // 1) compute expected from PDF
         var pdfCaseDetails = ParseCaseDetailsFromPdf(pdfPath);
         var expected = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
         foreach (var cd in pdfCaseDetails)
@@ -341,56 +346,271 @@ public static class InvoiceTxtFixer
             m[cd.ProductId] = cur + cd.Quantity;
         }
 
-        // Read fixed file and compute actual HU+Product totals
-        var actual = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        // 2) read fixed file lines
+        var origLines = File.ReadAllLines(fixedFilePath, Encoding.UTF8).ToList();
 
-        using var sr = new StreamReader(fixedFilePath, Encoding.UTF8, true);
-        string? line;
-        while ((line = sr.ReadLine()) != null)
+        var infos = new List<LineInfo>();
+
+        for (int i = 0; i < origLines.Count; i++)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            var cols = CsvSplit(line);
+            var raw = origLines[i];
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var cols = CsvSplit(raw);
             if (cols.Count == 0) continue;
             if (Unquote(cols[0]) != "2") continue;
 
             string productId = Unquote(Get(cols, 5));
             string hu = PadHu20(Unquote(Get(cols, 15)));
-            int qty = ToIntQuantity(ParseDec(Unquote(Get(cols, 6))));
+            decimal qty = ParseDec(Unquote(Get(cols, 6)));
+            decimal nett = ParseDec(Unquote(Get(cols, 7)));
+            decimal unitPrice = qty != 0 ? nett / qty : 0m;
 
-            if (!actual.TryGetValue(hu, out var m)) { m = new Dictionary<string, int>(StringComparer.Ordinal); actual[hu] = m; }
-            m.TryGetValue(productId, out int cur);
-            m[productId] = cur + qty;
+            infos.Add(new LineInfo(i, cols, productId, hu, qty, nett, unitPrice));
         }
 
-        // Compare expected vs actual (for every HU and product present in either)
+        // 3) compute actual totals
+        var actual = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        foreach (var info in infos)
+        {
+            int q = ToIntQuantity(info.Qty);
+            if (!actual.TryGetValue(info.Hu, out var m)) { m = new Dictionary<string, int>(StringComparer.Ordinal); actual[info.Hu] = m; }
+            m.TryGetValue(info.ProductId, out int cur);
+            m[info.ProductId] = cur + q;
+        }
+
+        // 4) collect mismatches (diff = actual - expected)
+        var mismatches = new Dictionary<(string Hu, string Product), int>();
+        var allHus = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var k in expected.Keys) allHus.Add(k);
+        foreach (var k in actual.Keys) allHus.Add(k);
+
+        foreach (var hu in allHus)
+        {
+            var prodKeys = new HashSet<string>(StringComparer.Ordinal);
+            if (expected.TryGetValue(hu, out var expMap)) foreach (var k in expMap.Keys) prodKeys.Add(k);
+            if (actual.TryGetValue(hu, out var actMap)) foreach (var k in actMap.Keys) prodKeys.Add(k);
+
+            foreach (var pid in prodKeys)
+            {
+                int exp = expMap != null && expMap.TryGetValue(pid, out var e) ? e : 0;
+                int act = actMap != null && actMap.TryGetValue(pid, out var a) ? a : 0;
+                int diff = act - exp;
+                if (diff != 0)
+                    mismatches[(hu, pid)] = diff;
+            }
+        }
+
+        // 5) attempt automated fixes by rebalancing surpluses -> deficits per product
+        var fixes = new List<string>();
+        // prepare per-product surplus/deficit lists
+        var byProductSurplus = new Dictionary<string, List<(string Hu, int Qty)>>(StringComparer.Ordinal);
+        var byProductDeficit = new Dictionary<string, List<(string Hu, int Qty)>>(StringComparer.Ordinal);
+
+        foreach (var kv in mismatches)
+        {
+            var (hu, pid) = kv.Key;
+            int diff = kv.Value;
+            if (diff > 0)
+            {
+                if (!byProductSurplus.TryGetValue(pid, out var list)) { list = new List<(string, int)>(); byProductSurplus[pid] = list; }
+                list.Add((hu, diff));
+            }
+            else
+            {
+                if (!byProductDeficit.TryGetValue(pid, out var list)) { list = new List<(string, int)>(); byProductDeficit[pid] = list; }
+                list.Add((hu, -diff)); // store positive needed amount
+            }
+        }
+
+        // Helper actions: decrease from source HU by amount (may span multiple lines)
+        void DecreaseFromSource(string productId, string sourceHu, int amount)
+        {
+            int remaining = amount;
+            var candidates = infos.Where(x => x.ProductId == productId && x.Hu == sourceHu && ToIntQuantity(x.Qty) > 0).OrderBy(x => x.Index).ToList();
+            foreach (var info in candidates)
+            {
+                if (remaining <= 0) break;
+                int lineQty = ToIntQuantity(info.Qty);
+                int take = Math.Min(lineQty, remaining);
+
+                // update the cols for this line in origLines
+                var cols = info.Cols;
+                decimal newQty = lineQty - take;
+                decimal unitPrice = info.UnitPrice;
+                decimal newNett = Round2(unitPrice * newQty);
+
+                cols[6] = newQty.ToString("0.000", CultureInfo.InvariantCulture);
+                cols[7] = newNett.ToString("0.00", CultureInfo.InvariantCulture);
+
+                // replace line text
+                origLines[info.Index] = string.Join(",", cols.Select(Quote));
+                remaining -= take;
+
+                // update infos list: mutate by replacing existing entry with updated values
+                // (we'll rebuild infos after all adjustments)
+            }
+            if (remaining > 0)
+            {
+                // couldn't fully decrease (shouldn't happen normally) — leave remainder (user must intervene)
+            }
+        }
+
+        // Helper to increase into target HU (prefer existing line, else append new line cloned from a template)
+        void IncreaseToTarget(string productId, string targetHu, int amount)
+        {
+            int remaining = amount;
+            // find existing line for product+target
+            var targetInfo = infos.FirstOrDefault(x => x.ProductId == productId && x.Hu == targetHu);
+            if (targetInfo != null)
+            {
+                int lineQty = ToIntQuantity(targetInfo.Qty);
+                decimal unitPrice = targetInfo.UnitPrice;
+                decimal newQty = lineQty + remaining;
+                decimal newNett = Round2(unitPrice * newQty);
+
+                var cols = targetInfo.Cols;
+                cols[6] = newQty.ToString("0.000", CultureInfo.InvariantCulture);
+                cols[7] = newNett.ToString("0.00", CultureInfo.InvariantCulture);
+                origLines[targetInfo.Index] = string.Join(",", cols.Select(Quote));
+                return;
+            }
+
+            // No existing line: clone a template line for same product (prefer one with quantity >0), else pick any.
+            var template = infos.FirstOrDefault(x => x.ProductId == productId);
+            if (template != null)
+            {
+                var cols = new List<string>(template.Cols); // copy
+                cols[15] = targetHu;
+                cols[6] = remaining.ToString("0.000", CultureInfo.InvariantCulture);
+                decimal unitPrice = template.UnitPrice;
+                cols[7] = Round2(unitPrice * remaining).ToString("0.00", CultureInfo.InvariantCulture);
+                var newLine = string.Join(",", cols.Select(Quote));
+                origLines.Add(newLine);
+                return;
+            }
+
+            // No template available: nothing to append (user action required)
+        }
+
+        // Perform transfers per product
+        foreach (var pid in byProductSurplus.Keys.ToList())
+        {
+            if (!byProductDeficit.TryGetValue(pid, out var deficits)) continue;
+            var surpluses = byProductSurplus[pid];
+
+            // simple greedy: match first surplus with first deficit
+            int sIdx = 0, dIdx = 0;
+            while (sIdx < surpluses.Count && dIdx < deficits.Count)
+            {
+                var (sHu, sAmt) = surpluses[sIdx];
+                var (dHu, dAmt) = deficits[dIdx];
+                int transfer = Math.Min(sAmt, dAmt);
+
+                // Apply transfer
+                DecreaseFromSource(pid, sHu, transfer);
+                IncreaseToTarget(pid, dHu, transfer);
+
+                fixes.Add($"Transfer {transfer} of product {pid} from HU {sHu} -> HU {dHu}");
+
+                // update lists
+                sAmt -= transfer;
+                dAmt -= transfer;
+                if (sAmt == 0) sIdx++; else surpluses[sIdx] = (sHu, sAmt);
+                if (dAmt == 0) dIdx++; else deficits[dIdx] = (dHu, dAmt);
+            }
+
+            // update dictionaries in case some remain; remaining unmatched will be left for user action
+            byProductSurplus[pid] = surpluses.Skip(sIdx).ToList();
+            byProductDeficit[pid] = deficits.Skip(dIdx).ToList();
+        }
+
+        // 6) persist modified fixed file (if any fixes done)
+        if (fixes.Count > 0)
+        {
+            // ensure we atomically write: write to temp then move
+            var temp = fixedFilePath + ".tmp";
+            File.WriteAllLines(temp, origLines, Encoding.UTF8);
+            File.Replace(temp, fixedFilePath, null);
+        }
+
+        // 7) recompute actual totals after attempted fixes
+        // Rebuild infos and actual from updated file
+        var updatedLines = File.ReadAllLines(fixedFilePath, Encoding.UTF8).ToList();
+        var updatedInfos = new List<LineInfo>();
+        for (int i = 0; i < updatedLines.Count; i++)
+        {
+            var raw = updatedLines[i];
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var cols = CsvSplit(raw);
+            if (cols.Count == 0) continue;
+            if (Unquote(cols[0]) != "2") continue;
+
+            string productId = Unquote(Get(cols, 5));
+            string hu = PadHu20(Unquote(Get(cols, 15)));
+            decimal qty = ParseDec(Unquote(Get(cols, 6)));
+            decimal nett = ParseDec(Unquote(Get(cols, 7)));
+            decimal unitPrice = qty != 0 ? nett / qty : 0m;
+
+            updatedInfos.Add(new LineInfo(i, cols, productId, hu, qty, nett, unitPrice));
+        }
+
+        var updatedActual = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        foreach (var info in updatedInfos)
+        {
+            int q = ToIntQuantity(info.Qty);
+            if (!updatedActual.TryGetValue(info.Hu, out var m)) { m = new Dictionary<string, int>(StringComparer.Ordinal); updatedActual[info.Hu] = m; }
+            m.TryGetValue(info.ProductId, out int cur);
+            m[info.ProductId] = cur + q;
+        }
+
+        // 8) produce verification report with statuses
         var sb = new StringBuilder();
-        bool allGood = true;
         sb.AppendLine($"Verification report for '{Path.GetFileName(fixedFilePath)}' vs PDF '{Path.GetFileName(pdfPath)}'");
         sb.AppendLine();
 
-        // collect union of keys
-        var hus = new HashSet<string>(expected.Keys, StringComparer.Ordinal);
-        foreach (var k in actual.Keys) hus.Add(k);
+        var hus2 = new HashSet<string>(expected.Keys, StringComparer.Ordinal);
+        foreach (var k in updatedActual.Keys) hus2.Add(k);
 
-        foreach (var hu in hus.OrderBy(x => x))
+        bool allGood = true;
+        foreach (var hu in hus2.OrderBy(x => x))
         {
             sb.AppendLine($"HU: {hu}");
             var prodKeys = new HashSet<string>(StringComparer.Ordinal);
             if (expected.TryGetValue(hu, out var expMap)) foreach (var k in expMap.Keys) prodKeys.Add(k);
-            if (actual.TryGetValue(hu, out var actMap)) foreach (var k in actMap.Keys) prodKeys.Add(k);
+            if (updatedActual.TryGetValue(hu, out var actMap)) foreach (var k in actMap.Keys) prodKeys.Add(k);
 
             foreach (var pid in prodKeys.OrderBy(x => x))
             {
                 int exp = expMap != null && expMap.TryGetValue(pid, out var e) ? e : 0;
                 int act = actMap != null && actMap.TryGetValue(pid, out var a) ? a : 0;
-                if (exp != act) allGood = false;
-                sb.AppendLine($"  Product {pid}: expected={exp}, actual={act}{(exp != act ? "  <-- MISMATCH" : "")}");
+                if (exp == act)
+                {
+                    sb.AppendLine($"  Product {pid}: expected={exp}, actual={act}  -- OK");
+                }
+                else
+                {
+                    allGood = false;
+                    // check whether this mismatch was present originally and we attempted fixes
+                    var originally = mismatches.ContainsKey((hu, pid));
+                    var fixedNow = !originally ? false : (mismatches[(hu, pid)] != (act - exp));
+                    // better: decide status based on whether any fix involved this PID and HU
+                    bool involvedInFix = fixes.Any(f => f.Contains($"product {pid}") && (f.Contains(hu) || f.Contains("-> " + hu) || f.Contains(hu + " ->")));
+                    string status = involvedInFix ? "-- MISMATCH (FIXED if you see 'OK' above else USER ACTION REQUIRED)" : "-- MISMATCH (USER ACTION REQUIRED)";
+                    sb.AppendLine($"  Product {pid}: expected={exp}, actual={act}  {status}");
+                }
             }
 
             sb.AppendLine();
         }
 
-        sb.AppendLine(allGood ? "VERIFICATION OK: all HU/product totals match PDF." : "VERIFICATION FAILED: mismatches found. See above.");
+        if (fixes.Count > 0)
+        {
+            sb.AppendLine("Automated adjustments performed:");
+            foreach (var fx in fixes) sb.AppendLine("  " + fx);
+            sb.AppendLine();
+        }
+
+        sb.AppendLine(allGood ? "VERIFICATION OK: all HU/product totals match PDF." : "VERIFICATION FAILED: mismatches remain. See above.");
         File.WriteAllText(reportPath, sb.ToString(), Encoding.UTF8);
         Console.WriteLine($"Verification written to {reportPath}");
         if (!allGood)
